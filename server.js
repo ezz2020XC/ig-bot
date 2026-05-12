@@ -1,23 +1,23 @@
 /**
  * server.js  —  Jazz Bar Instagram DM Agent
  * ─────────────────────────────────────────────────────────────
- * Flow: IG DM → GPT draft → WhatsApp notify → Owner approves → Send
+ * Flow: IG DM → Gemini draft → WhatsApp notify → Owner approves → Send
  *
- * Install: npm install express axios openai dotenv
+ * Install: npm install express axios @google/generative-ai dotenv
  * Run:     node server.js
  */
 
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const OpenAI = require("openai");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const ACCOUNTS = require("./accounts");
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Pending approvals: Map<whatsappMsgId, { account, senderId, username, draft }>
 const pending = new Map();
@@ -139,15 +139,9 @@ app.post("/whatsapp-reply", async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 
 async function generateDraft(systemPrompt, userMessage) {
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    max_tokens: 300,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ],
-  });
-  return response.choices[0].message.content.trim();
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const result = await model.generateContent(systemPrompt + "\n\nCustomer message: " + userMessage);
+  return result.response.text().trim();
 }
 
 async function getIGUsername(userId, accessToken) {
