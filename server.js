@@ -2,6 +2,10 @@
  * server.js  —  Jazz Bar Instagram DM Agent
  * ─────────────────────────────────────────────────────────────
  * Flow: IG DM → Groq draft → WhatsApp notify → Owner approves → Send
+ * Features:
+ *  - Greeting + reservation link for first message from new users
+ *  - Auto-send draft after 5 min if no owner action
+ *  - Multi-message queue with job IDs
  *
  * Install: npm install express axios groq-sdk dotenv
  * Run:     node server.js
@@ -19,10 +23,12 @@ app.use(express.urlencoded({ extended: true }));
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Queue of pending approvals — each DM gets a unique ID
-// Owner replies with: YES 1, EDIT 1 new text, NO 1
-const jobQueue = new Map();
+const jobQueue = new Map();  // jobId → job
 let jobCounter = 1;
+const seenUsers = new Set(); // track users we've greeted before
+
+const RESERVATION_LINK = "https://www.sevenrooms.com/reservations/jazzbarabudhabi";
+const AUTO_REPLY_MINUTES = 5;
 
 function resolveAccount(pageId) {
   return Object.entries(ACCOUNTS).find(
@@ -79,23 +85,63 @@ app.post("/webhook", async (req, res) => {
 
 async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
-  const draft = await generateDraft(account.systemPrompt, messageText);
+  const isNewUser = !seenUsers.has(senderId);
+
+  // Generate AI draft
+  const draft = await generateDraft(account.systemPrompt, messageText, isNewUser);
+
+  // Build final reply with greeting and reservation link for new users
+  let finalDraft = draft;
+  if (isNewUser) {
+    finalDraft =
+      `Hey! 👋 Thank you for reaching out to Jazz Bar Abu Dhabi! 🎷\n\n` +
+      `${draft}\n\n` +
+      `📅 You can also make a reservation directly here:\n${RESERVATION_LINK}`;
+  }
 
   const jobId = jobCounter++;
-  jobQueue.set(jobId, { accountKey, account, senderId, username, messageText, draft });
+  const job = {
+    accountKey,
+    account,
+    senderId,
+    username,
+    messageText,
+    draft: finalDraft,
+    isNewUser,
+    autoSendTimer: null,
+  };
 
+  jobQueue.set(jobId, job);
+
+  // ── Auto-send after 5 minutes if no owner action ──
+  job.autoSendTimer = setTimeout(async () => {
+    if (!jobQueue.has(jobId)) return; // already handled
+    console.log(`⏱️  Auto-sending draft for job #${jobId} (@${username})`);
+    try {
+      await sendIGReply(senderId, finalDraft, account.accessToken);
+      if (isNewUser) seenUsers.add(senderId);
+      await sendWhatsApp(`⏱️ *Auto-sent* reply to @${username} (job #${jobId}) after ${AUTO_REPLY_MINUTES} min inaction.`);
+      console.log(`✅ Auto-sent to @${username}`);
+    } catch (err) {
+      console.error(`❌ Auto-send failed for #${jobId}:`, err.message);
+    }
+    jobQueue.delete(jobId);
+  }, AUTO_REPLY_MINUTES * 60 * 1000);
+
+  // ── Notify owner on WhatsApp ──
   const waBody =
-    `${account.emoji} *${account.name} · New DM #${jobId}*\n` +
+    `${account.emoji} *${account.name} · New DM #${jobId}*${isNewUser ? " 🆕" : ""}\n` +
     `From: @${username}\n\n` +
     `💬 *Message:*\n"${messageText}"\n\n` +
-    `📝 *AI draft:*\n"${draft}"\n\n` +
+    `📝 *AI draft:*\n"${finalDraft}"\n\n` +
+    `⏱️ _Auto-sends in ${AUTO_REPLY_MINUTES} min if no action_\n\n` +
     `Reply:\n` +
-    `*YES ${jobId}* to send\n` +
+    `*YES ${jobId}* to send now\n` +
     `*EDIT ${jobId} your new text* to customise\n` +
     `*NO ${jobId}* to skip`;
 
   await sendWhatsApp(waBody);
-  console.log(`📱 Approval sent for job #${jobId} (@${username})`);
+  console.log(`📱 Approval sent for job #${jobId} (@${username})${isNewUser ? " [NEW USER]" : ""}`);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -113,20 +159,22 @@ app.post("/whatsapp-reply", async (req, res) => {
   const jobId = parseInt(parts[1]);
 
   if (isNaN(jobId)) {
-    console.log("⚠️  No job ID found in reply. Format: YES 1 / NO 1 / EDIT 1 new text");
-    await sendWhatsApp("⚠️ Please include the job number. Example:\nYES 1\nNO 1\nEDIT 1 your new text");
+    await sendWhatsApp("⚠️ Please include the job number.\nExamples:\nYES 1\nNO 1\nEDIT 1 your new text");
     return;
   }
 
   const job = jobQueue.get(jobId);
   if (!job) {
-    console.log(`⚠️  No job found for ID #${jobId}`);
-    await sendWhatsApp(`⚠️ No pending message found for #${jobId}`);
+    await sendWhatsApp(`⚠️ Job #${jobId} not found — it may have already been sent or skipped.`);
     return;
   }
 
+  // Cancel auto-send timer
+  clearTimeout(job.autoSendTimer);
+
   if (command === "YES") {
     await sendIGReply(job.senderId, job.draft, job.account.accessToken);
+    if (job.isNewUser) seenUsers.add(job.senderId);
     console.log(`✅ Sent approved draft to @${job.username}`);
     jobQueue.delete(jobId);
 
@@ -138,6 +186,7 @@ app.post("/whatsapp-reply", async (req, res) => {
     const editedText = parts.slice(2).join(" ").trim();
     if (editedText) {
       await sendIGReply(job.senderId, editedText, job.account.accessToken);
+      if (job.isNewUser) seenUsers.add(job.senderId);
       console.log(`✏️  Sent edited reply to @${job.username}`);
       jobQueue.delete(jobId);
     } else {
@@ -145,8 +194,7 @@ app.post("/whatsapp-reply", async (req, res) => {
     }
 
   } else {
-    console.log("❓ Unrecognised command:", command);
-    await sendWhatsApp("⚠️ Commands: YES [#] / NO [#] / EDIT [#] new text");
+    await sendWhatsApp("⚠️ Commands:\nYES [#]\nNO [#]\nEDIT [#] new text");
   }
 });
 
@@ -154,12 +202,16 @@ app.post("/whatsapp-reply", async (req, res) => {
 // HELPERS
 // ─────────────────────────────────────────────────────────────
 
-async function generateDraft(systemPrompt, userMessage) {
+async function generateDraft(systemPrompt, userMessage, isNewUser) {
+  const extra = isNewUser
+    ? `This is the first message from this user. Do NOT add a greeting or reservation link — that will be added automatically. Just answer their question naturally.`
+    : `This is a returning user. Just answer their question naturally.`;
+
   const response = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
     max_tokens: 300,
     messages: [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: systemPrompt + "\n\n" + extra },
       { role: "user", content: userMessage },
     ],
   });
