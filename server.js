@@ -1,28 +1,27 @@
 /**
  * server.js  —  Jazz Bar Instagram DM Agent
  * ─────────────────────────────────────────────────────────────
- * Flow: IG DM → Gemini draft → WhatsApp notify → Owner approves → Send
+ * Flow: IG DM → Groq draft → WhatsApp notify → Owner approves → Send
  *
- * Install: npm install express axios @google/generative-ai dotenv
+ * Install: npm install express axios groq-sdk dotenv
  * Run:     node server.js
  */
 
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Groq = require("groq-sdk");
 const ACCOUNTS = require("./accounts");
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // Pending approvals: Map<whatsappMsgId, { account, senderId, username, draft }>
 const pending = new Map();
 
-// Resolve which account a webhook belongs to
 function resolveAccount(pageId) {
   return Object.entries(ACCOUNTS).find(
     ([, acct]) => acct.pageId === pageId
@@ -33,7 +32,6 @@ function resolveAccount(pageId) {
 // INSTAGRAM WEBHOOK
 // ─────────────────────────────────────────────────────────────
 
-// Verification (GET)
 app.get("/webhook", (req, res) => {
   if (
     req.query["hub.mode"] === "subscribe" &&
@@ -45,9 +43,8 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-// Incoming events (POST)
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Always ack immediately
+  res.sendStatus(200);
 
   const body = req.body;
   if (body.object !== "instagram") return;
@@ -139,9 +136,15 @@ app.post("/whatsapp-reply", async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 
 async function generateDraft(systemPrompt, userMessage) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-  const result = await model.generateContent(systemPrompt + "\n\nCustomer message: " + userMessage);
-  return result.response.text().trim();
+  const response = await groq.chat.completions.create({
+    model: "llama3-8b-8192",
+    max_tokens: 300,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+  });
+  return response.choices[0].message.content.trim();
 }
 
 async function getIGUsername(userId, accessToken) {
