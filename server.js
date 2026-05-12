@@ -19,8 +19,10 @@ app.use(express.urlencoded({ extended: true }));
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Store latest pending job per owner number (sandbox doesn't return OriginalRepliedMessageSid)
-let latestJob = null;
+// Queue of pending approvals — each DM gets a unique ID
+// Owner replies with: YES 1, EDIT 1 new text, NO 1
+const jobQueue = new Map();
+let jobCounter = 1;
 
 function resolveAccount(pageId) {
   return Object.entries(ACCOUNTS).find(
@@ -79,18 +81,21 @@ async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
   const draft = await generateDraft(account.systemPrompt, messageText);
 
+  const jobId = jobCounter++;
+  jobQueue.set(jobId, { accountKey, account, senderId, username, messageText, draft });
+
   const waBody =
-    `${account.emoji} *${account.name} · New DM*\n` +
+    `${account.emoji} *${account.name} · New DM #${jobId}*\n` +
     `From: @${username}\n\n` +
     `💬 *Message:*\n"${messageText}"\n\n` +
     `📝 *AI draft:*\n"${draft}"\n\n` +
-    `Reply *YES* to send  |  *EDIT your new text*  |  *NO* to skip`;
+    `Reply:\n` +
+    `*YES ${jobId}* to send\n` +
+    `*EDIT ${jobId} your new text* to customise\n` +
+    `*NO ${jobId}* to skip`;
 
   await sendWhatsApp(waBody);
-
-  // Store as latest job (sandbox workaround)
-  latestJob = { accountKey, account, senderId, username, messageText, draft };
-  console.log(`📱 Approval sent to owner for @${username}`);
+  console.log(`📱 Approval sent for job #${jobId} (@${username})`);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -101,36 +106,47 @@ app.post("/whatsapp-reply", async (req, res) => {
   res.sendStatus(200);
 
   const incomingBody = (req.body.Body || "").trim();
-  const upper = incomingBody.toUpperCase();
-
   console.log(`📲 Owner replied: "${incomingBody}"`);
 
-  if (!latestJob) {
-    console.log("⚠️  No pending job found");
+  const parts = incomingBody.split(" ");
+  const command = parts[0].toUpperCase();
+  const jobId = parseInt(parts[1]);
+
+  if (isNaN(jobId)) {
+    console.log("⚠️  No job ID found in reply. Format: YES 1 / NO 1 / EDIT 1 new text");
+    await sendWhatsApp("⚠️ Please include the job number. Example:\nYES 1\nNO 1\nEDIT 1 your new text");
     return;
   }
 
-  const job = latestJob;
+  const job = jobQueue.get(jobId);
+  if (!job) {
+    console.log(`⚠️  No job found for ID #${jobId}`);
+    await sendWhatsApp(`⚠️ No pending message found for #${jobId}`);
+    return;
+  }
 
-  if (upper === "YES") {
+  if (command === "YES") {
     await sendIGReply(job.senderId, job.draft, job.account.accessToken);
     console.log(`✅ Sent approved draft to @${job.username}`);
-    latestJob = null;
+    jobQueue.delete(jobId);
 
-  } else if (upper === "NO") {
+  } else if (command === "NO") {
     console.log(`🚫 Skipped reply to @${job.username}`);
-    latestJob = null;
+    jobQueue.delete(jobId);
 
-  } else if (upper.startsWith("EDIT ")) {
-    const editedText = incomingBody.slice(5).trim();
+  } else if (command === "EDIT") {
+    const editedText = parts.slice(2).join(" ").trim();
     if (editedText) {
       await sendIGReply(job.senderId, editedText, job.account.accessToken);
       console.log(`✏️  Sent edited reply to @${job.username}`);
-      latestJob = null;
+      jobQueue.delete(jobId);
+    } else {
+      await sendWhatsApp(`⚠️ No text found. Format: EDIT ${jobId} your new message`);
     }
 
   } else {
-    console.log("❓ Unrecognised reply:", incomingBody);
+    console.log("❓ Unrecognised command:", command);
+    await sendWhatsApp("⚠️ Commands: YES [#] / NO [#] / EDIT [#] new text");
   }
 });
 
