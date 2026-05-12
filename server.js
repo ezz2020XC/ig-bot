@@ -19,8 +19,8 @@ app.use(express.urlencoded({ extended: true }));
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Pending approvals: Map<whatsappMsgId, { account, senderId, username, draft }>
-const pending = new Map();
+// Store latest pending job per owner number (sandbox doesn't return OriginalRepliedMessageSid)
+let latestJob = null;
 
 function resolveAccount(pageId) {
   return Object.entries(ACCOUNTS).find(
@@ -86,9 +86,11 @@ async function handleDM(accountKey, account, senderId, messageText) {
     `📝 *AI draft:*\n"${draft}"\n\n` +
     `Reply *YES* to send  |  *EDIT your new text*  |  *NO* to skip`;
 
-  const waMsgSid = await sendWhatsApp(waBody);
-  pending.set(waMsgSid, { accountKey, account, senderId, username, messageText, draft });
-  console.log(`📱 Approval sent to owner. SID: ${waMsgSid}`);
+  await sendWhatsApp(waBody);
+
+  // Store as latest job (sandbox workaround)
+  latestJob = { accountKey, account, senderId, username, messageText, draft };
+  console.log(`📱 Approval sent to owner for @${username}`);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -99,31 +101,32 @@ app.post("/whatsapp-reply", async (req, res) => {
   res.sendStatus(200);
 
   const incomingBody = (req.body.Body || "").trim();
-  const originalSid = req.body.OriginalRepliedMessageSid;
+  const upper = incomingBody.toUpperCase();
 
-  const job = pending.get(originalSid);
-  if (!job) {
-    console.log("⚠️  No pending job for SID:", originalSid);
+  console.log(`📲 Owner replied: "${incomingBody}"`);
+
+  if (!latestJob) {
+    console.log("⚠️  No pending job found");
     return;
   }
 
-  const upper = incomingBody.toUpperCase();
+  const job = latestJob;
 
   if (upper === "YES") {
     await sendIGReply(job.senderId, job.draft, job.account.accessToken);
     console.log(`✅ Sent approved draft to @${job.username}`);
-    pending.delete(originalSid);
+    latestJob = null;
 
   } else if (upper === "NO") {
     console.log(`🚫 Skipped reply to @${job.username}`);
-    pending.delete(originalSid);
+    latestJob = null;
 
   } else if (upper.startsWith("EDIT ")) {
     const editedText = incomingBody.slice(5).trim();
     if (editedText) {
       await sendIGReply(job.senderId, editedText, job.account.accessToken);
       console.log(`✏️  Sent edited reply to @${job.username}`);
-      pending.delete(originalSid);
+      latestJob = null;
     }
 
   } else {
