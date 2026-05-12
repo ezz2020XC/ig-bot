@@ -139,7 +139,7 @@ app.post("/whatsapp-reply", async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 
 async function generateDraft(systemPrompt, userMessage) {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
   const result = await model.generateContent(systemPrompt + "\n\nCustomer message: " + userMessage);
   return result.response.text().trim();
 }
