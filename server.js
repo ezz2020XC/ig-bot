@@ -112,15 +112,15 @@ async function handleDM(accountKey, account, senderId, messageText) {
     jobQueue.delete(jobId);
   }, AUTO_REPLY_MINUTES * 60 * 1000);
 
+  const t = (s) => s.length > 120 ? s.slice(0, 120) + "..." : s;
   const waBody =
-    `--- JOB #${jobId}${isNewUser ? " NEW" : ""} ---\n` +
-    `@${username}: "${messageText}"\n\n` +
-    `[A] ${finalA}\n\n` +
-    `[B] ${finalB}\n\n` +
-    `[C] ${finalC}\n\n` +
-    `Auto-sends A in ${AUTO_REPLY_MINUTES} min\n` +
-    `Reply: A ${jobId} / B ${jobId} / C ${jobId}\n` +
-    `EDIT ${jobId} your text / NO ${jobId}`;
+    `JOB #${jobId}${isNewUser ? " (NEW)" : ""} @${username}\n` +
+    `"${messageText}"\n\n` +
+    `[A] ${t(finalA)}\n\n` +
+    `[B] ${t(finalB)}\n\n` +
+    `[C] ${t(finalC)}\n\n` +
+    `Reply: A ${jobId} / B ${jobId} / C ${jobId} / NO ${jobId}\n` +
+    `Auto-sends A in ${AUTO_REPLY_MINUTES} min`;
 
   await sendWhatsApp(waBody);
   console.log(`📱 3 options sent for job #${jobId} (@${username})`);
