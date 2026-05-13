@@ -19,6 +19,7 @@ Key info:
 - No cover charge
 - Dress code: Smart casual
 - Reservations: Via DM or at https://www.sevenrooms.com/reservations/jazzbarabudhabi
+- Always refer to the venue as Jazz Bar, never Jazz Bar Abu Dhabi
 - Menu: Cocktails, wines, spirits, bar bites
 
 Rules:
