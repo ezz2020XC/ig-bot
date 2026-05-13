@@ -7,7 +7,7 @@
  *  - Greeting + reservation link for new users
  *  - Auto-send option A after 5 min if no owner action
  *  - Multi-message queue with job IDs
- *  - No emojis in AI replies
+ *  - Batch replies: "A 1, C 2, B 3" all at once
  *
  * Install: npm install express axios groq-sdk dotenv
  * Run:     node server.js
@@ -89,10 +89,8 @@ async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
   const isNewUser = !seenUsers.has(senderId);
 
-  // Generate 3 tone drafts
   const [draftA, draftB, draftC] = await generateThreeDrafts(account.systemPrompt, messageText, isNewUser);
 
-  // Add greeting + reservation link for new users
   const wrapDraft = (draft) => {
     if (!isNewUser) return draft;
     return `Thank you for reaching out to Jazz Bar Abu Dhabi.\n\n${draft}\n\nYou can make a reservation here: ${RESERVATION_LINK}`;
@@ -126,25 +124,23 @@ async function handleDM(accountKey, account, senderId, messageText) {
     jobQueue.delete(jobId);
   }, AUTO_REPLY_MINUTES * 60 * 1000);
 
-  // Notify owner
+  // Notify owner — compact format for easy batch handling
   const waBody =
-    `${account.emoji} ${account.name} - New DM #${jobId}${isNewUser ? " (NEW)" : ""}\n` +
-    `From: @${username}\n\n` +
-    `Message: "${messageText}"\n\n` +
-    `--- Option A (Warm & Friendly) ---\n${finalA}\n\n` +
-    `--- Option B (Sophisticated) ---\n${finalB}\n\n` +
-    `--- Option C (Direct) ---\n${finalC}\n\n` +
-    `Auto-sends option A in ${AUTO_REPLY_MINUTES} min\n\n` +
-    `Reply: A ${jobId} / B ${jobId} / C ${jobId}\n` +
-    `Or: EDIT ${jobId} your custom text\n` +
-    `Or: NO ${jobId} to skip`;
+    `--- JOB #${jobId}${isNewUser ? " NEW" : ""} ---\n` +
+    `@${username}: "${messageText}"\n\n` +
+    `[A] ${finalA}\n\n` +
+    `[B] ${finalB}\n\n` +
+    `[C] ${finalC}\n\n` +
+    `Auto-sends A in ${AUTO_REPLY_MINUTES} min\n` +
+    `Reply: A ${jobId} / B ${jobId} / C ${jobId} / EDIT ${jobId} text / NO ${jobId}\n` +
+    `Batch: A 1, C 2, B 3`;
 
   await sendWhatsApp(waBody);
   console.log(`📱 3 options sent for job #${jobId} (@${username})`);
 }
 
 // ─────────────────────────────────────────────────────────────
-// WHATSAPP APPROVAL REPLY
+// WHATSAPP APPROVAL REPLY — supports batch: "A 1, C 2, B 3"
 // ─────────────────────────────────────────────────────────────
 
 app.post("/whatsapp-reply", async (req, res) => {
@@ -153,47 +149,69 @@ app.post("/whatsapp-reply", async (req, res) => {
   const incomingBody = (req.body.Body || "").trim();
   console.log(`📲 Owner replied: "${incomingBody}"`);
 
-  const parts = incomingBody.split(" ");
-  const command = parts[0].toUpperCase();
-  const jobId = parseInt(parts[1]);
+  // Split by comma to support batch replies like "A 1, C 2, B 3"
+  const instructions = incomingBody.split(",").map(s => s.trim()).filter(Boolean);
+  const results = [];
 
-  if (isNaN(jobId)) {
-    await sendWhatsApp("Please include the job number.\nExamples:\nA 1\nB 1\nC 1\nEDIT 1 your text\nNO 1");
-    return;
-  }
+  for (const instruction of instructions) {
+    const parts = instruction.split(" ");
+    const command = parts[0].toUpperCase();
+    const jobId = parseInt(parts[1]);
 
-  const job = jobQueue.get(jobId);
-  if (!job) {
-    await sendWhatsApp(`Job #${jobId} not found - it may have already been sent or skipped.`);
-    return;
-  }
-
-  clearTimeout(job.autoSendTimer);
-
-  if (command === "A" || command === "B" || command === "C") {
-    const chosen = job.drafts[command];
-    await sendIGReply(job.senderId, chosen, job.account.accessToken);
-    if (job.isNewUser) seenUsers.add(job.senderId);
-    console.log(`✅ Sent option ${command} to @${job.username}`);
-    jobQueue.delete(jobId);
-
-  } else if (command === "EDIT") {
-    const editedText = parts.slice(2).join(" ").trim();
-    if (editedText) {
-      await sendIGReply(job.senderId, editedText, job.account.accessToken);
-      if (job.isNewUser) seenUsers.add(job.senderId);
-      console.log(`✏️  Sent custom reply to @${job.username}`);
-      jobQueue.delete(jobId);
-    } else {
-      await sendWhatsApp(`Format: EDIT ${jobId} your message text`);
+    if (isNaN(jobId)) {
+      results.push(`Job ID missing in: "${instruction}"`);
+      continue;
     }
 
-  } else if (command === "NO") {
-    console.log(`🚫 Skipped #${jobId}`);
-    jobQueue.delete(jobId);
+    const job = jobQueue.get(jobId);
+    if (!job) {
+      results.push(`#${jobId} not found or already sent`);
+      continue;
+    }
 
-  } else {
-    await sendWhatsApp("Commands:\nA [#] / B [#] / C [#]\nEDIT [#] your text\nNO [#]");
+    clearTimeout(job.autoSendTimer);
+
+    if (command === "A" || command === "B" || command === "C") {
+      const chosen = job.drafts[command];
+      try {
+        await sendIGReply(job.senderId, chosen, job.account.accessToken);
+        if (job.isNewUser) seenUsers.add(job.senderId);
+        results.push(`Sent ${command} to @${job.username} (#${jobId})`);
+        console.log(`✅ Sent option ${command} to @${job.username}`);
+      } catch (err) {
+        results.push(`Failed to send #${jobId}: ${err.message}`);
+      }
+      jobQueue.delete(jobId);
+
+    } else if (command === "EDIT") {
+      const editedText = parts.slice(2).join(" ").trim();
+      if (editedText) {
+        try {
+          await sendIGReply(job.senderId, editedText, job.account.accessToken);
+          if (job.isNewUser) seenUsers.add(job.senderId);
+          results.push(`Sent custom reply to @${job.username} (#${jobId})`);
+          console.log(`✏️  Sent custom reply to @${job.username}`);
+        } catch (err) {
+          results.push(`Failed to send #${jobId}: ${err.message}`);
+        }
+        jobQueue.delete(jobId);
+      } else {
+        results.push(`EDIT #${jobId} missing text. Format: EDIT ${jobId} your message`);
+      }
+
+    } else if (command === "NO") {
+      results.push(`Skipped #${jobId} (@${job.username})`);
+      console.log(`🚫 Skipped #${jobId}`);
+      jobQueue.delete(jobId);
+
+    } else {
+      results.push(`Unknown command "${command}" for #${jobId}`);
+    }
+  }
+
+  // Send confirmation back to owner
+  if (results.length > 0) {
+    await sendWhatsApp(results.join("\n"));
   }
 });
 
@@ -207,11 +225,11 @@ async function generateThreeDrafts(systemPrompt, userMessage, isNewUser) {
     : "This is a returning user. Just answer their question.";
 
   const prompt =
-    `Write 3 replies to this customer message, each in a different tone as defined in your instructions.\n` +
-    `Format your response EXACTLY like this with no extra text:\n` +
-    `TONE_A: [your warm friendly reply]\n` +
-    `TONE_B: [your sophisticated cool reply]\n` +
-    `TONE_C: [your direct concise reply]\n\n` +
+    `Write 3 replies to this customer message, each in a different tone.\n` +
+    `Format EXACTLY like this with no extra text:\n` +
+    `TONE_A: [warm and friendly reply]\n` +
+    `TONE_B: [sophisticated and cool reply]\n` +
+    `TONE_C: [direct and concise reply]\n\n` +
     `Customer message: "${userMessage}"`;
 
   const response = await groq.chat.completions.create({
@@ -225,15 +243,18 @@ async function generateThreeDrafts(systemPrompt, userMessage, isNewUser) {
 
   const text = response.choices[0].message.content.trim();
 
-  const extractTone = (label) => {
-    const match = text.match(new RegExp(`${label}:\\s*(.+?)(?=TONE_[BC]:|$)`, "s"));
-    return match ? match[1].trim() : "We would love to help. Please visit our page for more details.";
+  const extractTone = (label, nextLabel) => {
+    const regex = nextLabel
+      ? new RegExp(`${label}:\\s*(.+?)(?=${nextLabel}:)`, "s")
+      : new RegExp(`${label}:\\s*(.+)$`, "s");
+    const match = text.match(regex);
+    return match ? match[1].trim() : "We would love to help. Please reach out for more details.";
   };
 
   return [
-    extractTone("TONE_A"),
-    extractTone("TONE_B"),
-    extractTone("TONE_C"),
+    extractTone("TONE_A", "TONE_B"),
+    extractTone("TONE_B", "TONE_C"),
+    extractTone("TONE_C", null),
   ];
 }
 
