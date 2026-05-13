@@ -7,7 +7,7 @@
  *  - Greeting + reservation link for new users
  *  - Auto-send option A after 5 min if no owner action
  *  - Multi-message queue with job IDs
- *  - Batch replies: "A 1, C 2, B 3" all at once
+ *  - No emojis in AI replies
  *
  * Install: npm install express axios groq-sdk dotenv
  * Run:     node server.js
@@ -38,10 +38,6 @@ function resolveAccount(pageId) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────
-// INSTAGRAM WEBHOOK
-// ─────────────────────────────────────────────────────────────
-
 app.get("/webhook", (req, res) => {
   if (
     req.query["hub.mode"] === "subscribe" &&
@@ -62,10 +58,7 @@ app.post("/webhook", async (req, res) => {
   for (const entry of body.entry || []) {
     const pageId = entry.id;
     const accountEntry = resolveAccount(pageId);
-    if (!accountEntry) {
-      console.log(`⚠️  Unknown page ID: ${pageId}`);
-      continue;
-    }
+    if (!accountEntry) continue;
 
     const [accountKey, account] = accountEntry;
 
@@ -80,10 +73,6 @@ app.post("/webhook", async (req, res) => {
     }
   }
 });
-
-// ─────────────────────────────────────────────────────────────
-// CORE FLOW
-// ─────────────────────────────────────────────────────────────
 
 async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
@@ -110,7 +99,6 @@ async function handleDM(accountKey, account, senderId, messageText) {
 
   jobQueue.set(jobId, job);
 
-  // Auto-send option A after 5 minutes
   job.autoSendTimer = setTimeout(async () => {
     if (!jobQueue.has(jobId)) return;
     console.log(`⏱️  Auto-sending draft A for job #${jobId} (@${username})`);
@@ -124,7 +112,6 @@ async function handleDM(accountKey, account, senderId, messageText) {
     jobQueue.delete(jobId);
   }, AUTO_REPLY_MINUTES * 60 * 1000);
 
-  // Notify owner — compact format for easy batch handling
   const waBody =
     `--- JOB #${jobId}${isNewUser ? " NEW" : ""} ---\n` +
     `@${username}: "${messageText}"\n\n` +
@@ -132,16 +119,12 @@ async function handleDM(accountKey, account, senderId, messageText) {
     `[B] ${finalB}\n\n` +
     `[C] ${finalC}\n\n` +
     `Auto-sends A in ${AUTO_REPLY_MINUTES} min\n` +
-    `Reply: A ${jobId} / B ${jobId} / C ${jobId} / EDIT ${jobId} text / NO ${jobId}\n` +
-    `Batch: A 1, C 2, B 3`;
+    `Reply: A ${jobId} / B ${jobId} / C ${jobId}\n` +
+    `EDIT ${jobId} your text / NO ${jobId}`;
 
   await sendWhatsApp(waBody);
   console.log(`📱 3 options sent for job #${jobId} (@${username})`);
 }
-
-// ─────────────────────────────────────────────────────────────
-// WHATSAPP APPROVAL REPLY — supports batch: "A 1, C 2, B 3"
-// ─────────────────────────────────────────────────────────────
 
 app.post("/whatsapp-reply", async (req, res) => {
   res.sendStatus(200);
@@ -149,75 +132,52 @@ app.post("/whatsapp-reply", async (req, res) => {
   const incomingBody = (req.body.Body || "").trim();
   console.log(`📲 Owner replied: "${incomingBody}"`);
 
-  // Split by comma to support batch replies like "A 1, C 2, B 3"
-  const instructions = incomingBody.split(",").map(s => s.trim()).filter(Boolean);
-  const results = [];
+  const parts = incomingBody.split(" ");
+  const command = parts[0].toUpperCase();
+  const jobId = parseInt(parts[1]);
 
-  for (const instruction of instructions) {
-    const parts = instruction.split(" ");
-    const command = parts[0].toUpperCase();
-    const jobId = parseInt(parts[1]);
-
-    if (isNaN(jobId)) {
-      results.push(`Job ID missing in: "${instruction}"`);
-      continue;
-    }
-
-    const job = jobQueue.get(jobId);
-    if (!job) {
-      results.push(`#${jobId} not found or already sent`);
-      continue;
-    }
-
-    clearTimeout(job.autoSendTimer);
-
-    if (command === "A" || command === "B" || command === "C") {
-      const chosen = job.drafts[command];
-      try {
-        await sendIGReply(job.senderId, chosen, job.account.accessToken);
-        if (job.isNewUser) seenUsers.add(job.senderId);
-        results.push(`Sent ${command} to @${job.username} (#${jobId})`);
-        console.log(`✅ Sent option ${command} to @${job.username}`);
-      } catch (err) {
-        results.push(`Failed to send #${jobId}: ${err.message}`);
-      }
-      jobQueue.delete(jobId);
-
-    } else if (command === "EDIT") {
-      const editedText = parts.slice(2).join(" ").trim();
-      if (editedText) {
-        try {
-          await sendIGReply(job.senderId, editedText, job.account.accessToken);
-          if (job.isNewUser) seenUsers.add(job.senderId);
-          results.push(`Sent custom reply to @${job.username} (#${jobId})`);
-          console.log(`✏️  Sent custom reply to @${job.username}`);
-        } catch (err) {
-          results.push(`Failed to send #${jobId}: ${err.message}`);
-        }
-        jobQueue.delete(jobId);
-      } else {
-        results.push(`EDIT #${jobId} missing text. Format: EDIT ${jobId} your message`);
-      }
-
-    } else if (command === "NO") {
-      results.push(`Skipped #${jobId} (@${job.username})`);
-      console.log(`🚫 Skipped #${jobId}`);
-      jobQueue.delete(jobId);
-
-    } else {
-      results.push(`Unknown command "${command}" for #${jobId}`);
-    }
+  if (isNaN(jobId)) {
+    await sendWhatsApp("Please include the job number.\nExamples:\nA 1\nB 1\nC 1\nEDIT 1 your text\nNO 1");
+    return;
   }
 
-  // Send confirmation back to owner
-  if (results.length > 0) {
-    await sendWhatsApp(results.join("\n"));
+  const job = jobQueue.get(jobId);
+  if (!job) {
+    await sendWhatsApp(`Job #${jobId} not found - already sent or skipped.`);
+    return;
+  }
+
+  clearTimeout(job.autoSendTimer);
+
+  if (command === "A" || command === "B" || command === "C") {
+    const chosen = job.drafts[command];
+    await sendIGReply(job.senderId, chosen, job.account.accessToken);
+    if (job.isNewUser) seenUsers.add(job.senderId);
+    console.log(`✅ Sent option ${command} to @${job.username}`);
+    await sendWhatsApp(`Sent option ${command} to @${job.username} (#${jobId})`);
+    jobQueue.delete(jobId);
+
+  } else if (command === "EDIT") {
+    const editedText = parts.slice(2).join(" ").trim();
+    if (editedText) {
+      await sendIGReply(job.senderId, editedText, job.account.accessToken);
+      if (job.isNewUser) seenUsers.add(job.senderId);
+      console.log(`✏️  Sent custom reply to @${job.username}`);
+      await sendWhatsApp(`Sent custom reply to @${job.username} (#${jobId})`);
+      jobQueue.delete(jobId);
+    } else {
+      await sendWhatsApp(`Format: EDIT ${jobId} your message`);
+    }
+
+  } else if (command === "NO") {
+    console.log(`🚫 Skipped #${jobId}`);
+    await sendWhatsApp(`Skipped #${jobId} (@${job.username})`);
+    jobQueue.delete(jobId);
+
+  } else {
+    await sendWhatsApp("Commands:\nA [#] / B [#] / C [#]\nEDIT [#] your text\nNO [#]");
   }
 });
-
-// ─────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────
 
 async function generateThreeDrafts(systemPrompt, userMessage, isNewUser) {
   const extra = isNewUser
@@ -300,7 +260,6 @@ async function sendWhatsApp(body) {
   }));
 }
 
-// ─────────────────────────────────────────────────────────────
 app.listen(process.env.PORT || 3000, () => {
   console.log(`🚀 Agent running on port ${process.env.PORT || 3000}`);
   console.log(`📋 Accounts: ${Object.keys(ACCOUNTS).join(", ")}`);
