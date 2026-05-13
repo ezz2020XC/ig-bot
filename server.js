@@ -78,7 +78,7 @@ async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
   const isNewUser = !seenUsers.has(senderId);
 
-  const [draftA, draftB, draftC] = await generateThreeDrafts(account.systemPrompt, messageText, isNewUser);
+  const [draftA, draftB] = await generateTwoDrafts(account.systemPrompt, messageText, isNewUser);
 
   const wrapDraft = (draft) => {
     if (!isNewUser) return draft;
@@ -87,12 +87,11 @@ async function handleDM(accountKey, account, senderId, messageText) {
 
   const finalA = wrapDraft(draftA);
   const finalB = wrapDraft(draftB);
-  const finalC = wrapDraft(draftC);
 
   const jobId = jobCounter++;
   const job = {
     accountKey, account, senderId, username, messageText,
-    drafts: { A: finalA, B: finalB, C: finalC },
+    drafts: { A: finalA, B: finalB },
     isNewUser,
     autoSendTimer: null,
   };
@@ -118,8 +117,7 @@ async function handleDM(accountKey, account, senderId, messageText) {
     `"${messageText}"\n\n` +
     `[A] ${t(finalA)}\n\n` +
     `[B] ${t(finalB)}\n\n` +
-    `[C] ${t(finalC)}\n\n` +
-    `Reply: A ${jobId} / B ${jobId} / C ${jobId} / NO ${jobId}\n` +
+    `Reply: A ${jobId} / B ${jobId} / NO ${jobId}\n` +
     `Auto-sends A in ${AUTO_REPLY_MINUTES} min`;
 
   await sendWhatsApp(waBody);
@@ -149,7 +147,7 @@ app.post("/whatsapp-reply", async (req, res) => {
 
   clearTimeout(job.autoSendTimer);
 
-  if (command === "A" || command === "B" || command === "C") {
+  if (command === "A" || command === "B") {
     const chosen = job.drafts[command];
     await sendIGReply(job.senderId, chosen, job.account.accessToken);
     if (job.isNewUser) seenUsers.add(job.senderId);
@@ -175,21 +173,20 @@ app.post("/whatsapp-reply", async (req, res) => {
     jobQueue.delete(jobId);
 
   } else {
-    await sendWhatsApp("Commands:\nA [#] / B [#] / C [#]\nEDIT [#] your text\nNO [#]");
+    await sendWhatsApp("Commands:\nA [#] / B [#]\nEDIT [#] your text\nNO [#]");
   }
 });
 
-async function generateThreeDrafts(systemPrompt, userMessage, isNewUser) {
+async function generateTwoDrafts(systemPrompt, userMessage, isNewUser) {
   const extra = isNewUser
     ? "This is the first message from this user. Do NOT add a greeting or reservation link - those will be added automatically. Just answer their question."
     : "This is a returning user. Just answer their question.";
 
   const prompt =
-    `Write 3 replies to this customer message, each in a different tone.\n` +
+    `Write 2 replies to this customer message, each in a different tone.\n` +
     `Format EXACTLY like this with no extra text:\n` +
     `TONE_A: [warm and friendly reply]\n` +
-    `TONE_B: [sophisticated and cool reply]\n` +
-    `TONE_C: [direct and concise reply]\n\n` +
+    `TONE_B: [sophisticated and cool reply]\n\n` +
     `Customer message: "${userMessage}"`;
 
   const response = await groq.chat.completions.create({
@@ -213,8 +210,7 @@ async function generateThreeDrafts(systemPrompt, userMessage, isNewUser) {
 
   return [
     extractTone("TONE_A", "TONE_B"),
-    extractTone("TONE_B", "TONE_C"),
-    extractTone("TONE_C", null),
+    extractTone("TONE_B", null),
   ];
 }
 
