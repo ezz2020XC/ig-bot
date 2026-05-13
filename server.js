@@ -94,9 +94,9 @@ async function handleDM(accountKey, account, senderId, messageText) {
   let finalDraft = draft;
   if (isNewUser) {
     finalDraft =
-      `Hey! 👋 Thank you for reaching out to Jazz Bar Abu Dhabi! 🎷\n\n` +
+      `Hi, thank you for reaching out to Jazz Bar ! \n\n` +
       `${draft}\n\n` +
-      `📅 You can also make a reservation directly here:\n${RESERVATION_LINK}`;
+      ` You can also make a reservation directly here:\n${RESERVATION_LINK}`;
   }
 
   const jobId = jobCounter++;
