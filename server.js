@@ -239,13 +239,14 @@ async function sendWhatsApp(body) {
   const authToken = process.env.TWILIO_AUTH_TOKEN;
   const numbers = process.env.OWNER_WHATSAPP.split(",").map(n => n.trim());
 
-  await Promise.all(numbers.map(number => {
+  // Send sequentially with delay to avoid Twilio 429 rate limit
+  for (const number of numbers) {
     const params = new URLSearchParams({
       From: process.env.TWILIO_WHATSAPP_FROM,
       To: `whatsapp:${number}`,
       Body: body,
     });
-    return axios.post(
+    await axios.post(
       `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
       params.toString(),
       {
@@ -253,7 +254,9 @@ async function sendWhatsApp(body) {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       }
     );
-  }));
+    // Small delay between sends
+    if (numbers.length > 1) await new Promise(r => setTimeout(r, 500));
+  }
 }
 
 app.listen(process.env.PORT || 3000, () => {
