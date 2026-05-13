@@ -83,7 +83,7 @@ async function handleDM(accountKey, account, senderId, messageText) {
   const wrapDraft = (draft) => {
     if (!isNewUser) return draft;
     return (
-      `Thank you for reaching out to Jazz Bar Abu Dhabi.\n\n` +
+      `Hey @${username}, thank you for reaching out to Jazz Bar!\n\n` +
       `${draft}\n\n` +
       `Reservations: ${RESERVATION_LINK}`
     );
@@ -108,7 +108,7 @@ async function handleDM(accountKey, account, senderId, messageText) {
     try {
       await sendIGReply(senderId, finalA, account.accessToken);
       if (isNewUser) seenUsers.add(senderId);
-      await sendWhatsApp(`Auto-sent A to @${username} (#${jobId})`);
+      await sendWhatsApp(`Auto-sent reply to @${username} (#${jobId})`);
       console.log(`⏱️ Auto-sent to @${username}`);
     } catch (err) {
       console.error(`Auto-send failed:`, err.message);
@@ -119,8 +119,8 @@ async function handleDM(accountKey, account, senderId, messageText) {
   const waBody =
     `#${jobId}${isNewUser ? " NEW" : ""} @${username}\n` +
     `"${messageText}"\n\n` +
-    `[A] ${finalA}\n\n` +
-    `[B] ${finalB}\n\n` +
+    `Option A:\n${finalA}\n\n` +
+    `Option B:\n${finalB}\n\n` +
     `A ${jobId} / B ${jobId} / EDIT ${jobId} text / NO ${jobId}\n` +
     `Auto-sends A in ${AUTO_REPLY_MINUTES} min`;
 
