@@ -1,22 +1,12 @@
 /**
  * server.js  —  Jazz Bar Instagram DM Agent
- * ─────────────────────────────────────────────────────────────
- * Flow: IG DM → Groq draft → WhatsApp notify → Owner approves → Send
- * Features:
- *  - 2 tone options (A/B) per DM
- *  - Greeting + reservation link for new users
- *  - Auto-send option A after 5 min if no owner action
- *  - Multi-message queue with job IDs
- *  - No emojis in AI replies
- *
- * Install: npm install express axios groq-sdk dotenv
- * Run:     node server.js
  */
 
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const Groq = require("groq-sdk");
+const fs = require("fs");
 const ACCOUNTS = require("./accounts");
 
 const app = express();
@@ -27,26 +17,42 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const jobQueue = new Map();
 let jobCounter = 1;
-const seenUsers = new Set();
 
-// Message grouping: collect messages from same user within 3 seconds
-const pendingMessages = new Map(); // senderId -> { messages[], timer, account, accountKey }
+// Persist seenUsers to disk so it survives redeploys
+const SEEN_FILE = "/tmp/seen_users.json";
+let seenUsers = new Set();
+try {
+  const data = JSON.parse(fs.readFileSync(SEEN_FILE, "utf8"));
+  seenUsers = new Set(data);
+  console.log(`📂 Loaded ${seenUsers.size} seen users`);
+} catch { seenUsers = new Set(); }
 
-// Check if a string is emoji-only (no real words or letters)
+function saveSeenUsers() {
+  fs.writeFileSync(SEEN_FILE, JSON.stringify([...seenUsers]));
+}
+
+// Message grouping: hold messages per user for 3 seconds then combine
+const pendingMessages = new Map();
+
+// Skip emoji-only messages
 function isEmojiOnly(text) {
-  const cleaned = text.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{FE00}-\u{FEFF}\u{200D}\u{20D0}-\u{20FF}]/gu, "").trim();
-  const noSpecial = cleaned.replace(/[^\w]/g, "").trim();
-  return noSpecial.length === 0;
+  const cleaned = text
+    .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{FE00}-\u{FEFF}\u{200D}\u{20D0}-\u{20FF}]/gu, "")
+    .replace(/[^\w]/g, "")
+    .trim();
+  return cleaned.length === 0;
 }
 
 const RESERVATION_LINK = "https://www.sevenrooms.com/reservations/jazzbarabudhabi";
 const AUTO_REPLY_MINUTES = 5;
 
 function resolveAccount(pageId) {
-  return Object.entries(ACCOUNTS).find(
-    ([, acct]) => acct.pageId === pageId
-  );
+  return Object.entries(ACCOUNTS).find(([, acct]) => acct.pageId === pageId);
 }
+
+// ─────────────────────────────────────────────────────────────
+// INSTAGRAM WEBHOOK
+// ─────────────────────────────────────────────────────────────
 
 app.get("/webhook", (req, res) => {
   if (
@@ -80,51 +86,51 @@ app.post("/webhook", async (req, res) => {
 
       // Skip emoji-only messages
       if (isEmojiOnly(text)) {
-        console.log(`⏭️  Skipped emoji-only message from ${senderId}: "${text}"`);
+        console.log(`⏭️  Skipped emoji-only from ${senderId}: "${text}"`);
         continue;
       }
 
-      console.log(`📩 [${account.name}] DM from ${senderId}: "${text}"`);
+      console.log(`📩 [${account.name}] from ${senderId}: "${text}"`);
 
-      // Group messages from same user within 3 seconds into one
+      // Group rapid messages from same user — wait 3s after last message
       if (pendingMessages.has(senderId)) {
-        const pending = pendingMessages.get(senderId);
-        clearTimeout(pending.timer);
-        pending.messages.push(text);
-        pending.timer = setTimeout(() => {
-          const combined = pending.messages.join(" ");
+        const p = pendingMessages.get(senderId);
+        clearTimeout(p.timer);
+        p.messages.push(text);
+        p.timer = setTimeout(() => {
+          const combined = p.messages.join(" ");
           pendingMessages.delete(senderId);
-          console.log(`📦 Grouped ${pending.messages.length} messages from ${senderId}: "${combined}"`);
-          handleDM(pending.accountKey, pending.account, senderId, combined).catch(console.error);
+          console.log(`📦 Combined ${p.messages.length} msgs: "${combined}"`);
+          handleDM(p.accountKey, p.account, senderId, combined).catch(console.error);
         }, 3000);
       } else {
-        const pending = {
-          messages: [text],
-          accountKey,
-          account,
-          timer: setTimeout(() => {
-            const combined = pendingMessages.get(senderId)?.messages.join(" ") || text;
-            pendingMessages.delete(senderId);
-            if (combined === text) {
-              console.log(`📩 Single message from ${senderId}: "${combined}"`);
-            }
-            handleDM(accountKey, account, senderId, combined).catch(console.error);
-          }, 3000)
-        };
-        pendingMessages.set(senderId, pending);
+        const p = { messages: [text], accountKey, account };
+        p.timer = setTimeout(() => {
+          const combined = pendingMessages.get(senderId)?.messages.join(" ") || text;
+          pendingMessages.delete(senderId);
+          handleDM(accountKey, account, senderId, combined).catch(console.error);
+        }, 3000);
+        pendingMessages.set(senderId, p);
       }
     }
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// CORE FLOW
+// ─────────────────────────────────────────────────────────────
+
 async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
+
+  // isNewUser = never replied to before (persisted across redeploys)
   const isNewUser = !seenUsers.has(senderId);
 
   const [draftA, draftB] = await generateTwoDrafts(account.systemPrompt, messageText, isNewUser);
 
   const wrapDraft = (draft) => {
     if (!isNewUser) return draft;
+    // Reservation link ONLY on very first message ever from this user
     return (
       `Hey @${username}, thank you for reaching out to Jazz Bar!\n\n` +
       `${draft}\n\n` +
@@ -145,12 +151,11 @@ async function handleDM(accountKey, account, senderId, messageText) {
 
   jobQueue.set(jobId, job);
 
-  // Auto-send option A after 5 minutes if no action
   job.autoSendTimer = setTimeout(async () => {
     if (!jobQueue.has(jobId)) return;
     try {
       await sendIGReply(senderId, finalA, account.accessToken);
-      if (isNewUser) seenUsers.add(senderId);
+      if (isNewUser) { seenUsers.add(senderId); saveSeenUsers(); }
       await sendWhatsApp(`Auto-sent reply to @${username} (#${jobId})`);
       console.log(`⏱️ Auto-sent to @${username}`);
     } catch (err) {
@@ -170,6 +175,10 @@ async function handleDM(accountKey, account, senderId, messageText) {
   await sendWhatsApp(waBody);
   console.log(`📱 Sent job #${jobId} to owner (@${username})`);
 }
+
+// ─────────────────────────────────────────────────────────────
+// WHATSAPP APPROVAL REPLY
+// ─────────────────────────────────────────────────────────────
 
 app.post("/whatsapp-reply", async (req, res) => {
   res.sendStatus(200);
@@ -197,7 +206,7 @@ app.post("/whatsapp-reply", async (req, res) => {
   if (command === "A" || command === "B") {
     const chosen = job.drafts[command];
     await sendIGReply(job.senderId, chosen, job.account.accessToken);
-    if (job.isNewUser) seenUsers.add(job.senderId);
+    if (job.isNewUser) { seenUsers.add(job.senderId); saveSeenUsers(); }
     console.log(`✅ Sent option ${command} to @${job.username}`);
     await sendWhatsApp(`Sent ${command} to @${job.username} (#${jobId})`);
     jobQueue.delete(jobId);
@@ -206,7 +215,7 @@ app.post("/whatsapp-reply", async (req, res) => {
     const editedText = parts.slice(2).join(" ").trim();
     if (editedText) {
       await sendIGReply(job.senderId, editedText, job.account.accessToken);
-      if (job.isNewUser) seenUsers.add(job.senderId);
+      if (job.isNewUser) { seenUsers.add(job.senderId); saveSeenUsers(); }
       console.log(`✏️ Sent custom reply to @${job.username}`);
       await sendWhatsApp(`Sent custom reply to @${job.username} (#${jobId})`);
       jobQueue.delete(jobId);
@@ -223,6 +232,10 @@ app.post("/whatsapp-reply", async (req, res) => {
     await sendWhatsApp("Format:\nA 1 / B 1 / NO 1\nEDIT 1 your text");
   }
 });
+
+// ─────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────
 
 async function generateTwoDrafts(systemPrompt, userMessage, isNewUser) {
   const extra = isNewUser
