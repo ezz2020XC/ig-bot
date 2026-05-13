@@ -92,7 +92,7 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`📩 [${account.name}] from ${senderId}: "${text}"`);
 
-      // Group rapid messages from same user — wait 3s after last message
+      // Group rapid messages — wait 3s after the LAST message before processing
       if (pendingMessages.has(senderId)) {
         const p = pendingMessages.get(senderId);
         clearTimeout(p.timer);
@@ -103,11 +103,14 @@ app.post("/webhook", async (req, res) => {
           console.log(`📦 Combined ${p.messages.length} msgs: "${combined}"`);
           handleDM(p.accountKey, p.account, senderId, combined).catch(console.error);
         }, 3000);
+        pendingMessages.set(senderId, p);
       } else {
-        const p = { messages: [text], accountKey, account };
+        const p = { messages: [text], accountKey, account, timer: null };
         p.timer = setTimeout(() => {
-          const combined = pendingMessages.get(senderId)?.messages.join(" ") || text;
+          const stored = pendingMessages.get(senderId);
+          const combined = stored ? stored.messages.join(" ") : text;
           pendingMessages.delete(senderId);
+          console.log(`📩 Processing: "${combined}"`);
           handleDM(accountKey, account, senderId, combined).catch(console.error);
         }, 3000);
         pendingMessages.set(senderId, p);
@@ -123,8 +126,14 @@ app.post("/webhook", async (req, res) => {
 async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
 
-  // isNewUser = never replied to before (persisted across redeploys)
+  // isNewUser = never contacted before (persisted across redeploys)
   const isNewUser = !seenUsers.has(senderId);
+
+  // Mark as seen immediately so follow-up messages don't get the greeting again
+  if (isNewUser) {
+    seenUsers.add(senderId);
+    saveSeenUsers();
+  }
 
   const [draftA, draftB] = await generateTwoDrafts(account.systemPrompt, messageText, isNewUser);
 
@@ -155,7 +164,6 @@ async function handleDM(accountKey, account, senderId, messageText) {
     if (!jobQueue.has(jobId)) return;
     try {
       await sendIGReply(senderId, finalA, account.accessToken);
-      if (isNewUser) { seenUsers.add(senderId); saveSeenUsers(); }
       await sendWhatsApp(`Auto-sent reply to @${username} (#${jobId})`);
       console.log(`⏱️ Auto-sent to @${username}`);
     } catch (err) {
@@ -206,7 +214,6 @@ app.post("/whatsapp-reply", async (req, res) => {
   if (command === "A" || command === "B") {
     const chosen = job.drafts[command];
     await sendIGReply(job.senderId, chosen, job.account.accessToken);
-    if (job.isNewUser) { seenUsers.add(job.senderId); saveSeenUsers(); }
     console.log(`✅ Sent option ${command} to @${job.username}`);
     await sendWhatsApp(`Sent ${command} to @${job.username} (#${jobId})`);
     jobQueue.delete(jobId);
@@ -215,7 +222,6 @@ app.post("/whatsapp-reply", async (req, res) => {
     const editedText = parts.slice(2).join(" ").trim();
     if (editedText) {
       await sendIGReply(job.senderId, editedText, job.account.accessToken);
-      if (job.isNewUser) { seenUsers.add(job.senderId); saveSeenUsers(); }
       console.log(`✏️ Sent custom reply to @${job.username}`);
       await sendWhatsApp(`Sent custom reply to @${job.username} (#${jobId})`);
       jobQueue.delete(jobId);
