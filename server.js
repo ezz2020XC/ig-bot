@@ -34,11 +34,11 @@ function saveSeenUsers() {
 // Message grouping: hold messages per user for 3 seconds then combine
 const pendingMessages = new Map();
 
-// Skip emoji-only messages
+// Skip emoji-only messages — keep Arabic, English and all real text
 function isEmojiOnly(text) {
   const cleaned = text
     .replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{FE00}-\u{FEFF}\u{200D}\u{20D0}-\u{20FF}]/gu, "")
-    .replace(/[^\w]/g, "")
+    .replace(/[^\w\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/g, "")
     .trim();
   return cleaned.length === 0;
 }
