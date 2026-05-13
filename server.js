@@ -2,6 +2,12 @@
  * server.js  —  Jazz Bar Instagram DM Agent
  * ─────────────────────────────────────────────────────────────
  * Flow: IG DM → Groq draft → WhatsApp notify → Owner approves → Send
+ * Features:
+ *  - 2 tone options (A/B) per DM
+ *  - Greeting + reservation link for new users
+ *  - Auto-send option A after 5 min if no owner action
+ *  - Multi-message queue with job IDs
+ *  - No emojis in AI replies
  *
  * Install: npm install express axios groq-sdk dotenv
  * Run:     node server.js
@@ -72,30 +78,37 @@ async function handleDM(accountKey, account, senderId, messageText) {
   const username = await getIGUsername(senderId, account.accessToken);
   const isNewUser = !seenUsers.has(senderId);
 
-  const draft = await generateDraft(account.systemPrompt, messageText, isNewUser);
+  const [draftA, draftB] = await generateTwoDrafts(account.systemPrompt, messageText, isNewUser);
 
-  let finalDraft = draft;
-  if (isNewUser) {
-    finalDraft =
+  const wrapDraft = (draft) => {
+    if (!isNewUser) return draft;
+    return (
       `Thank you for reaching out to Jazz Bar Abu Dhabi.\n\n` +
       `${draft}\n\n` +
-      `Reservations: ${RESERVATION_LINK}`;
-  }
+      `Reservations: ${RESERVATION_LINK}`
+    );
+  };
+
+  const finalA = wrapDraft(draftA);
+  const finalB = wrapDraft(draftB);
 
   const jobId = jobCounter++;
   const job = {
-    accountKey, account, senderId, username,
-    messageText, draft: finalDraft, isNewUser,
+    accountKey, account, senderId, username, messageText,
+    drafts: { A: finalA, B: finalB },
+    isNewUser,
     autoSendTimer: null,
   };
 
   jobQueue.set(jobId, job);
 
+  // Auto-send option A after 5 minutes if no action
   job.autoSendTimer = setTimeout(async () => {
     if (!jobQueue.has(jobId)) return;
     try {
-      await sendIGReply(senderId, finalDraft, account.accessToken);
+      await sendIGReply(senderId, finalA, account.accessToken);
       if (isNewUser) seenUsers.add(senderId);
+      await sendWhatsApp(`Auto-sent A to @${username} (#${jobId})`);
       console.log(`⏱️ Auto-sent to @${username}`);
     } catch (err) {
       console.error(`Auto-send failed:`, err.message);
@@ -104,10 +117,12 @@ async function handleDM(accountKey, account, senderId, messageText) {
   }, AUTO_REPLY_MINUTES * 60 * 1000);
 
   const waBody =
-    `#${jobId} @${username}\n` +
+    `#${jobId}${isNewUser ? " NEW" : ""} @${username}\n` +
     `"${messageText}"\n\n` +
-    `${finalDraft}\n\n` +
-    `YES ${jobId} / EDIT ${jobId} text / NO ${jobId}`;
+    `[A] ${finalA}\n\n` +
+    `[B] ${finalB}\n\n` +
+    `A ${jobId} / B ${jobId} / EDIT ${jobId} text / NO ${jobId}\n` +
+    `Auto-sends A in ${AUTO_REPLY_MINUTES} min`;
 
   await sendWhatsApp(waBody);
   console.log(`📱 Sent job #${jobId} to owner (@${username})`);
@@ -124,7 +139,7 @@ app.post("/whatsapp-reply", async (req, res) => {
   const jobId = parseInt(parts[1]);
 
   if (isNaN(jobId)) {
-    await sendWhatsApp("Format: YES 1 / NO 1 / EDIT 1 your text");
+    await sendWhatsApp("Format:\nA 1 / B 1 / NO 1\nEDIT 1 your text");
     return;
   }
 
@@ -136,14 +151,12 @@ app.post("/whatsapp-reply", async (req, res) => {
 
   clearTimeout(job.autoSendTimer);
 
-  if (command === "YES") {
-    await sendIGReply(job.senderId, job.draft, job.account.accessToken);
+  if (command === "A" || command === "B") {
+    const chosen = job.drafts[command];
+    await sendIGReply(job.senderId, chosen, job.account.accessToken);
     if (job.isNewUser) seenUsers.add(job.senderId);
-    console.log(`✅ Sent to @${job.username}`);
-    jobQueue.delete(jobId);
-
-  } else if (command === "NO") {
-    console.log(`🚫 Skipped #${jobId}`);
+    console.log(`✅ Sent option ${command} to @${job.username}`);
+    await sendWhatsApp(`Sent ${command} to @${job.username} (#${jobId})`);
     jobQueue.delete(jobId);
 
   } else if (command === "EDIT") {
@@ -151,31 +164,58 @@ app.post("/whatsapp-reply", async (req, res) => {
     if (editedText) {
       await sendIGReply(job.senderId, editedText, job.account.accessToken);
       if (job.isNewUser) seenUsers.add(job.senderId);
-      console.log(`✏️ Sent edited to @${job.username}`);
+      console.log(`✏️ Sent custom reply to @${job.username}`);
+      await sendWhatsApp(`Sent custom reply to @${job.username} (#${jobId})`);
       jobQueue.delete(jobId);
     } else {
       await sendWhatsApp(`Format: EDIT ${jobId} your message`);
     }
 
+  } else if (command === "NO") {
+    console.log(`🚫 Skipped #${jobId}`);
+    await sendWhatsApp(`Skipped #${jobId}`);
+    jobQueue.delete(jobId);
+
   } else {
-    await sendWhatsApp("Format: YES 1 / NO 1 / EDIT 1 your text");
+    await sendWhatsApp("Format:\nA 1 / B 1 / NO 1\nEDIT 1 your text");
   }
 });
 
-async function generateDraft(systemPrompt, userMessage, isNewUser) {
+async function generateTwoDrafts(systemPrompt, userMessage, isNewUser) {
   const extra = isNewUser
-    ? "First message from this user. Do NOT add greeting or reservation link. Just answer their question."
+    ? "First message from this user. Do NOT add greeting or reservation link - added automatically. Just answer their question."
     : "Returning user. Just answer their question.";
+
+  const prompt =
+    `Write 2 replies to this customer message in 2 different tones.\n` +
+    `Format EXACTLY like this:\n` +
+    `TONE_A: [warm and friendly reply]\n` +
+    `TONE_B: [sophisticated and cool reply]\n\n` +
+    `Customer message: "${userMessage}"`;
 
   const response = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
-    max_tokens: 200,
+    max_tokens: 400,
     messages: [
       { role: "system", content: systemPrompt + "\n\n" + extra },
-      { role: "user", content: userMessage },
+      { role: "user", content: prompt },
     ],
   });
-  return response.choices[0].message.content.trim();
+
+  const text = response.choices[0].message.content.trim();
+
+  const extractTone = (label, nextLabel) => {
+    const regex = nextLabel
+      ? new RegExp(`${label}:\\s*(.+?)(?=${nextLabel}:)`, "s")
+      : new RegExp(`${label}:\\s*(.+)$`, "s");
+    const match = text.match(regex);
+    return match ? match[1].trim() : "We would love to help. Please reach out for more details.";
+  };
+
+  return [
+    extractTone("TONE_A", "TONE_B"),
+    extractTone("TONE_B", null),
+  ];
 }
 
 async function getIGUsername(userId, accessToken) {
@@ -201,21 +241,24 @@ async function sendIGReply(recipientId, text, accessToken) {
 async function sendWhatsApp(body) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const numbers = process.env.OWNER_WHATSAPP.split(",").map(n => n.trim());
 
-  const params = new URLSearchParams({
-    From: process.env.TWILIO_WHATSAPP_FROM,
-    To: `whatsapp:${process.env.OWNER_WHATSAPP}`,
-    Body: body,
-  });
-
-  await axios.post(
-    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
-    params.toString(),
-    {
-      auth: { username: accountSid, password: authToken },
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    }
-  );
+  for (const number of numbers) {
+    const params = new URLSearchParams({
+      From: process.env.TWILIO_WHATSAPP_FROM,
+      To: `whatsapp:${number}`,
+      Body: body,
+    });
+    await axios.post(
+      `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+      params.toString(),
+      {
+        auth: { username: accountSid, password: authToken },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }
+    );
+    if (numbers.length > 1) await new Promise(r => setTimeout(r, 500));
+  }
 }
 
 app.listen(process.env.PORT || 3000, () => {
