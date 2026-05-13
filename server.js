@@ -29,6 +29,16 @@ const jobQueue = new Map();
 let jobCounter = 1;
 const seenUsers = new Set();
 
+// Message grouping: collect messages from same user within 3 seconds
+const pendingMessages = new Map(); // senderId -> { messages[], timer, account, accountKey }
+
+// Check if a string is emoji-only (no real words or letters)
+function isEmojiOnly(text) {
+  const cleaned = text.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}\u{FE00}-\u{FEFF}\u{200D}\u{20D0}-\u{20FF}]/gu, "").trim();
+  const noSpecial = cleaned.replace(/[^\w]/g, "").trim();
+  return noSpecial.length === 0;
+}
+
 const RESERVATION_LINK = "https://www.sevenrooms.com/reservations/jazzbarabudhabi";
 const AUTO_REPLY_MINUTES = 5;
 
@@ -68,8 +78,41 @@ app.post("/webhook", async (req, res) => {
       const text = event.message?.text;
       if (!senderId || !text) continue;
 
+      // Skip emoji-only messages
+      if (isEmojiOnly(text)) {
+        console.log(`⏭️  Skipped emoji-only message from ${senderId}: "${text}"`);
+        continue;
+      }
+
       console.log(`📩 [${account.name}] DM from ${senderId}: "${text}"`);
-      handleDM(accountKey, account, senderId, text).catch(console.error);
+
+      // Group messages from same user within 3 seconds into one
+      if (pendingMessages.has(senderId)) {
+        const pending = pendingMessages.get(senderId);
+        clearTimeout(pending.timer);
+        pending.messages.push(text);
+        pending.timer = setTimeout(() => {
+          const combined = pending.messages.join(" ");
+          pendingMessages.delete(senderId);
+          console.log(`📦 Grouped ${pending.messages.length} messages from ${senderId}: "${combined}"`);
+          handleDM(pending.accountKey, pending.account, senderId, combined).catch(console.error);
+        }, 3000);
+      } else {
+        const pending = {
+          messages: [text],
+          accountKey,
+          account,
+          timer: setTimeout(() => {
+            const combined = pendingMessages.get(senderId)?.messages.join(" ") || text;
+            pendingMessages.delete(senderId);
+            if (combined === text) {
+              console.log(`📩 Single message from ${senderId}: "${combined}"`);
+            }
+            handleDM(accountKey, account, senderId, combined).catch(console.error);
+          }, 3000)
+        };
+        pendingMessages.set(senderId, pending);
+      }
     }
   }
 });
