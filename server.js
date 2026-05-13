@@ -137,9 +137,18 @@ async function handleDM(accountKey, account, senderId, messageText) {
 
   const [draftA, draftB] = await generateTwoDrafts(account.systemPrompt, messageText, isNewUser);
 
+  // Detect if message is Arabic
+  const isArabic = /[\u0600-\u06FF]/.test(messageText);
+
   const wrapDraft = (draft) => {
     if (!isNewUser) return draft;
-    // Reservation link ONLY on very first message ever from this user
+    if (isArabic) {
+      return (
+        `اهلا @${username}، شكراً لتواصلك مع جاز بار!\n\n` +
+        `${draft}\n\n` +
+        `للحجز: ${RESERVATION_LINK}`
+      );
+    }
     return (
       `Hey @${username}, thank you for reaching out to Jazz Bar!\n\n` +
       `${draft}\n\n` +
